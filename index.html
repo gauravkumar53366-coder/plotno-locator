@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Plot Locator — Satellite Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    html,body,#map { height:100%; margin:0; padding:0 }
+    #map{ position:fixed; inset:0 }
+    .topbar { position:absolute; left:10px; top:10px; z-index:1000; background:#fff; padding:8px; border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.15) }
+    .btn { display:inline-block; margin:3px; padding:8px 10px; border-radius:6px; background:#1976d2; color:#fff; cursor:pointer; font-size:14px }
+    .btn.secondary { background:#4caf50 }
+    .infoBox { margin-top:6px; font-size:14px }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="topbar">
+    <div><strong>Plot Locator</strong></div>
+    <div style="margin-top:6px">
+      <button id="locateBtn" class="btn">Meri location dhoondo</button>
+      <button id="fitAllBtn" class="btn secondary">Poore map ko dikhao</button>
+    </div>
+    <div class="infoBox" id="info"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+
+  <script>
+    const PLOT_PROP = 'Name';
+    const map = L.map('map');
+    const esri = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      attribution: 'Tiles © Esri'
+    }).addTo(map);
+
+    let geoLayer = L.geoJSON(null, {
+      style: f => ({ color:'#ff7800', weight:2, fillOpacity:0.2 }),
+      onEachFeature: onEachFeature
+    }).addTo(map);
+
+    fetch('data.geojson')
+      .then(r => {
+        if (!r.ok) throw new Error('GeoJSON load error: ' + r.status);
+        return r.json();
+      })
+      .then(data => {
+        window.geojsonData = data;
+        geoLayer.addData(data);
+        addLabels();
+        // zoom level fixed higher after fitting bounds
+        const bounds = geoLayer.getBounds();
+        map.fitBounds(bounds);
+        map.setZoom(Math.min(map.getZoom(), 19)); // zoom limit increased
+      })
+      .catch(err => {
+        console.error(err);
+        map.setView([25.339365,85.765942], 19); // default zoom increased
+        document.getElementById('info').innerText = 'GeoJSON load error: ' + err.message;
+      });
+
+    function onEachFeature(feature, layer) {
+      const plotNo = (feature.properties && feature.properties[PLOT_PROP]) ? feature.properties[PLOT_PROP] : 'Unknown';
+      layer.bindTooltip(`Plot: ${plotNo}`);
+      layer.on('click', () => showFeatureInfo(feature, layer));
+    }
+
+    function showFeatureInfo(feature, layer) {
+      const plotNo = (feature.properties && feature.properties[PLOT_PROP]) ? feature.properties[PLOT_PROP] : 'Unknown';
+      let areaSqFt = 'N/A';
+      try {
+        areaSqFt = (turf.area(feature) * 10.763910416709722).toFixed(2);
+      } catch(e){}
+      let center = [0,0];
+      try {
+        const c = turf.centroid(feature).geometry.coordinates;
+        center = [c[1], c[0]];
+      } catch(e){}
+      const googleLink = `https://www.google.com/maps/search/?api=1&query=${center[0]},${center[1]}`;
+      layer.bindPopup(`<div><strong>Plot: ${plotNo}</strong><br/>Area: ${areaSqFt} sq ft<br/><a href="${googleLink}" target="_blank">Google Maps par dekhe</a></div>`).openPopup();
+    }
+
+    document.getElementById('locateBtn').addEventListener('click', () => {
+      document.getElementById('info').innerText = 'Location dhoonda ja raha...';
+      map.locate({setView:false, enableHighAccuracy:true});
+    });
+
+    map.on('locationfound', function(e){
+      const latlng = [e.latitude, e.longitude];
+      if (window._youMarker) map.removeLayer(window._youMarker);
+      window._youMarker = L.circleMarker(latlng, {radius:7, color:'#1976d2', fillColor:'#1976d2', fillOpacity:1}).addTo(map);
+
+      let foundFeature = null;
+      if (window.geojsonData && window.geojsonData.features) {
+        window.geojsonData.features.forEach(f => {
+          try {
+            if (turf.booleanPointInPolygon(turf.point([e.longitude, e.latitude]), f)) foundFeature = f;
+          } catch(e){}
+        });
+      }
+
+      if (foundFeature) {
+        document.getElementById('info').innerText = 'Aap is plot me khade hain: ' + (foundFeature.properties[PLOT_PROP] || 'Unknown');
+        if (window._highlight) map.removeLayer(window._highlight);
+        window._highlight = L.geoJSON(foundFeature, {style:{color:'#00bfa5', weight:3, fillOpacity:0.25}}).addTo(map);
+        try {
+          const c = turf.centroid(foundFeature).geometry.coordinates;
+          L.popup().setLatLng([c[1], c[0]]).setContent(`<strong>Plot: ${foundFeature.properties[PLOT_PROP] || 'Unknown'}</strong>`).openOn(map);
+        } catch(e){}
+        map.setView(latlng, 20); // zoom in more on found location
+      } else {
+        document.getElementById('info').innerText = 'Koi plot nahi mila jahan aap khade hain.';
+        map.setView(latlng, 19); // zoom in more
+      }
+    });
+
+    map.on('locationerror', function(e){
+      document.getElementById('info').innerText = 'Location error: ' + e.message;
+    });
+
+    function addLabels() {
+      if (!window.geojsonData) return;
+      if (window._labelLayer) map.removeLayer(window._labelLayer);
+      const list = [];
+      window.geojsonData.features.forEach(f => {
+        try {
+          const c = turf.centroid(f).geometry.coordinates;
+          const plotNo = (f.properties && f.properties[PLOT_PROP]) ? f.properties[PLOT_PROP] : '';
+          const m = L.marker([c[1], c[0]], {
+            icon: L.divIcon({className:'plot-label', html:`<div style="font-weight:600; background:rgba(255,255,255,0.9); padding:2px 6px; border-radius:4px; border:1px solid #ccc">${plotNo}</div>`})
+          });
+          list.push(m);
+        } catch(e){}
+      });
+      window._labelLayer = L.layerGroup(list).addTo(map);
+    }
+
+    document.getElementById('fitAllBtn').addEventListener('click', () => {
+      if (geoLayer && geoLayer.getBounds && geoLayer.getBounds().isValid()) {
+        map.fitBounds(geoLayer.getBounds());
+        map.setZoom(Math.min(map.getZoom(), 19)); // keep zoom high
+      }
+      else alert('GeoJSON data nahin mila ya valid nahi hai.');
+    });
+
+    window.geojsonData = window.geojsonData || null;
+  </script>
+</body>
+</html>
